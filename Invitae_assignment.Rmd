@@ -1,0 +1,385 @@
+---
+title: "Invitae_assignment"
+author: "Mingdong Liu"
+date: "3/19/2020"
+output: html_document
+indent: FALSE
+header-includes:
+  -\setlength{\parindent}{0pt}
+  -verb+\parindent+ =\the\parindent
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, comment = "")
+require(knitr)
+```
+## Goals  
+  
+1.Develop an algorithm to identify changes of allele frequency of SNP loci and to estimate mixing fraction of two sources of DNA/RNA with SNP NGS data;  
+  
+2.Integrate the algorithm into a software/application, which takes count CSV files as input and outputs calling of informative SNPs and mixing fractions by sample in CSV format.  
+
+
+## Algorithm development 
+  
+### General idea  
+  
+For a biallelic locus (SNP in our data), given no somatic mutation, the genotype frequency should be 0 or 1 for homozygote, 0.5 for heterozygote. Many factors may cause deviation from these theoretic frequencies, such as sequencing noise, somatic mutation, or mixing (fetal and maternal DNA). In a well-designed study that sequencing noise can be estimated with the control sample, the deviation of genotype frequency can provide very useful information. The test to determine whether a genotype frequency is informative, that is, the deviation of frequency result from factors other than sequencing noise, is built on this rationale.  the change between observed genotype frequency and its theoretical frequency can be regarded as the mixing fraction of a minority.   
+  
+This idea can extend to the data with a set of SNPs: the mean change of genotype frequencies is the mixing fraction.  However, in the situation that a set of SNPs are measured in the mixture of two samples (major sample and minor sample), the genotypes of the major and of the minor can differ by 0, 1 and 2 alleles, hence the change of post-mixing frequencies can be different. The following table shows one example given 200 counts from the major and 5 counts from the minor.  
+  
+`r kable(read.csv("snp_genotyping.csv"),caption = "Change of frequency after mixing")`  
+  
+In most study settings, such as mixing fetal DNA in maternal background, tumor and normal tissue mixing, it is reasonable to make the assumption that the situation that two alleles of a locus from the major and the minor are both different (i.e. AA vs aa) is very rare, if any.  
+  
+However, the theoretical genotype frequency of a SNP locus is unknown except that it may be one of 0, 0.5 and 1. In our algorithm, the observed frequency is compared to these 3 numbers, the difference with the smallest absolute value is considered to be the difference between observed and theoretical frequencies. This assumption holds when the mixing fraction is small, say, less than 25%.   
+  
+As the first step, also the first question of the assignment, we need to find the loci whose genotype frequencies are changed after mixing, resulting from different genotypes of the major and the minor, such loci are called informative loci. For statistical inference, we assume the change between observed frequency and theoretical frequency is in normal distribution. This is a reasonable assumption because we believe that sequencing noise would not add a bias to individual genotype of a SNP locus.The informative loci can be identified with z test or t test by comparing to the control sample.  
+ 
+### Data transformation
+1.Observed allele frequency is generated from the count data;  
+2.The frequency difference (R) is defined as the difference between 0, 0.5 and1 such that the absolute value of this difference is the smallest of 3 ones.   
+  
+$$pctR = \frac{n_A}{n_A + n_a}$$  
+  
+$$R = \{R: |R| = min[|pctR - 0|, |pctR - 0.5|, |pctR - 1|]\}$$ 
+pctR is the observed allele frequency. For example, R for observed allele frequency pctR = 0.1 is 0.1, and R for observed allele frequency pctR = 0.95 is -0.05. R is further converted to its absolute value, absR, for estimation of mixing fractions:  
+  
+$$ absR = |R|$$  
+
+### Assumptions  
+1.R is the change of allele frequency after mixing with normally distributed noise inside the sample, that is,  
+$$R = pctR_{post} - pctR_{pre} = Mixing \ fraction  + Noise$$  
+$pctR_{post}$ is allele frequency after mixing, and $pctR_{pre}$ is theoretical allele frequency without mixing, estimated from the control sample.  
+  
+2.Mixing causes changes of allele frequencies of a locus at same level but maybe in opposite directions, therefore, change directions (sign of difference) does not matter in estimating the mixing fraction, that is, for biallelic A and a,
+$$R_A = -R_a$$
+
+### Testing  
+1.Informative SNPs: direct calculate probabilities based on null distribution, and Null distribution is estimated from control sample; Alternatively, the threshold (calling criteria) can be determined with training dataset and with AUC/ROC standard.  
+2.Fraction estimation: Linear regression.   
+
+### Missing values  
+Missing values are set to be 1 in this example. In the future, handling missing values should be careful by checking the cause of missingness.  
+
+
+```{r }
+require(reshape2)
+
+#function to calculate R
+calculateR = function(pctR){
+  tmp = data.frame(h1 = pctR -0,
+                   h2 = pctR - 0.5,
+                   h3 = pctR - 1)
+  return(as.vector(apply(tmp, 1, function(x) return(x[abs(x) == min(abs(x))][1]))))
+}
+
+
+dtafolder = "/home/lmd/Documents/job_application/invitae_assignment"
+myfiles = file.path(dtafolder,paste0("hw_sample_",0:2,".csv"))
+mydta <- vector(mode = "list", length = length(myfiles))
+for (idx in 1:length(myfiles)){
+  tmp = read.csv(myfiles[idx], stringsAsFactors = FALSE)
+  tmp$sample = idx
+  mydta[[idx]] = reshape(tmp, v.names = "count", idvar = "dbSNP.ID", timevar = "allele", direction = "wide")
+  mydta[[idx]] = mydta[[idx]][,c("sample","dbSNP.ID","count.R", "count.A")]
+}
+
+#combining wide data
+mydta_wide = do.call(rbind, mydta)
+
+#turn sample variable into factor
+mydta_wide$sample = as.factor(mydta_wide$sample)
+
+#convert NA count to 1
+mydta_wide[is.na(mydta_wide[,4]),4] <- 1
+mydta_wide[is.na(mydta_wide[,3]),3] <- 1
+
+mydta_wide$sumsnp = rowSums(mydta_wide[,c("count.R", "count.A")])
+mydta_wide$pctR = mydta_wide$count.R/mydta_wide$sumsnp
+
+#calculate minimum difference between pctR and 0,0.5,1
+tmp = data.frame(h1 = rep(0, length(mydta_wide$pctR)) - mydta_wide$pctR,
+                 h2 = rep(0.5, length(mydta_wide$pctR))  - mydta_wide$pctR,
+                 h3 = rep(1, length(mydta_wide$pctR)) - mydta_wide$pctR
+                 )
+mydta_wide$R = as.vector(apply(tmp, 1, function(x) return(x[abs(x) == min(abs(x))])))
+mydta_wide$absR = abs(mydta_wide$R)
+
+#identify informative SNP
+
+##estimate mean and sd from the control sample
+ctr_mean = mean(mydta_wide$R[mydta_wide$sample == 1])
+ctr_sd = sd(mydta_wide$R[mydta_wide$sample == 1])
+ctr_mean = 0 #even though the mean is not 0, we still set it to be 0
+
+mydta_wide$pvalue = NA
+#mydta_wide$pvalue[mydta_wide$sample == 1] = pnorm(mydta_wide$R[mydta_wide$sample == 1], mean = ctr_mean, sd = ctr_sd)
+mydta_wide$pvalue[mydta_wide$sample == 2] = pnorm(mydta_wide$R[mydta_wide$sample == 2], mean = ctr_mean, sd = ctr_sd)
+mydta_wide$pvalue[mydta_wide$sample == 3] = pnorm(mydta_wide$R[mydta_wide$sample == 3], mean = ctr_mean, sd = ctr_sd)
+
+mydta_wide$pcat = 0
+mydta_wide$pcat[mydta_wide$pvalue < 0.025 | mydta_wide$pvalue > 0.975] = 1
+mydta_wide$pcat[mydta_wide$pvalue < 0.005 | mydta_wide$pvalue > 0.995] = 2
+mydta_wide$pcat[mydta_wide$pvalue < 0.0025 | mydta_wide$pvalue > 0.9975] = 3
+```
+  
+### The transformed frequency difference (R) demonstrated  a normal distribution within a sample  
+  
+The frequency difference (R) is generated as described above, the normal distribution of R in the control sample is demonstrated with the histogram and QQ plot below.  
+  
+```{r}
+#plotting
+
+par(mfrow = c(1,2))
+hist(mydta_wide$R[mydta_wide$sample == 1], breaks = 20, main = "Histogram of R in control sample", xlab = "R")
+qqnorm(mydta_wide$R[mydta_wide$sample == 1])
+qqline(mydta_wide$R[mydta_wide$sample == 1])
+```
+  
+Whether the frequency difference of a SNP is inforamtive can be inferred by comparing it to the null normal distribution obtained from control sample.  
+Here the calling criteria is set at different p value levels, however, this criteria can also be determined with a training dataset with ROC curve.  
+    
+```{r}
+dsubset1 = mydta_wide[mydta_wide$sample == 1,]
+dsubset2 = mydta_wide[mydta_wide$sample == 2,]
+dsubset3 = mydta_wide[mydta_wide$sample == 3,]
+
+plot(1:nrow(dsubset1), dsubset1$R, pch = 20, col = dsubset1$pcat + 1, ylim = c(-0.25,0.25), xlab = "SNP", xaxt = "n", ylab = "R")
+par(new = T)
+plot(1:nrow(dsubset2), dsubset2$R, pch = 20, col = dsubset2$pcat + 1, ylim = c(-0.25,0.25), xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+par(new = T)
+plot(1:nrow(dsubset3), dsubset3$R, pch = 20, col = dsubset3$pcat + 1, ylim = c(-0.25,0.25), xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+axis(1, at = 1:nrow(dsubset1), labels = 1:nrow(dsubset1), cex.lab = 0.6)
+legend("topright", legend = paste0("p < ",c(0.05,0.01,0.005)), col = 2:4, pch = 20)
+
+#sample sd
+mysd = aggregate(mydta_wide$R, by = list(mydta_wide$sample), sd)
+
+boxplot(mydta_wide$R ~ mydta_wide$sample, xlab = "Samples", ylab = "R")
+stripchart(mydta_wide$R ~ mydta_wide$sample, add = TRUE, vertical = TRUE, method = "jitter", pch = 19, col = "blue")
+abline(h = c(-1.96,1.96)*mysd[1,2], col = "red")
+abline(h = c(-2.58,2.58)*mysd[1,2], col = "green")
+text(x = 0.7, y = 0.07, labels = paste0("p < 0.05"), col = "red", cex.lab = 0.6)
+text(x = 0.7, y = 0.12, labels = paste0("p < 0.005"), col = "green", cex.lab = 0.6)
+
+op1 = mydta_wide[,c(1,2,10)]
+op1[,1] <- paste0("hw_sample_",as.numeric(op1[,1]) -1,".csv")
+pcal <- rep(FALSE, nrow(op1))
+pcal[op1[,3] >= 2]<- TRUE
+op1 <- data.frame("file" = op1[,1],
+                  "snp" = op1[,2],
+                  "informative" = pcal)
+write.csv(op1,"output1.csv")
+```
+  
+## Estimating the mixing fractions    
+  
+Estimating the mixing fractions can be performed with a linear regression model. Note: since mixing can cause increase in some allele frequencies, it can also cause decrease in other allele frequencies, so we convert R into its absolute values (absR).     
+  
+$$absR_{sample} \sim absR_{control} + Mixing\ fraction$$  
+In this model, the estimated mean difference in absR between the sample and the control is considered to be the mixing factor.  
+
+```{r}  
+
+#paired ttest
+mydta_s2 = mydta_wide[mydta_wide$sample %in% c(1,2) & mydta_wide$pcat[mydta_wide$sample == 2] >=1, ]
+myfit_s2 = lm(absR ~ sample + dbSNP.ID, data = mydta_s2)
+
+mydta_s3 = mydta_wide[mydta_wide$sample %in% c(1,3) & mydta_wide$pcat[mydta_wide$sample == 3] >=1, ]
+myfit_s3 = lm(absR ~ sample + dbSNP.ID, data = mydta_s3)
+
+op2 = rbind(summary(myfit_s2)$coefficients[2,],summary(myfit_s3)$coefficients[2,])
+rownames(op2) <- paste0("hw_sample_",1:2,".csv")
+colnames(op2) <- c("Minority_fraction_mean","standard_error","t_value","p_value")
+op2
+write.csv(op2, "output2.csv")
+```
+
+## Simulation study  
+  
+Simulation is performed here to demonstrate effectiveness of the algorithm and the performance of informative SNP calling and mixing fraction estimation.    
+Simulation settings:  
+- Total counts for each locus are between 400 and 1500.  
+- 100 SNPs per sample;   
+- biallelic;   
+- Poisson noise ($\lambda = 10$);   
+- Mixing fraction from 0 to 15%;    
+  
+  
+```{r}
+#set.seed(1234)
+nsnp = 100
+p_thresh_for_snp = 0.01
+lambda = 10
+alpha = 0.05
+
+#define function
+getRatioDiff = function(ratio){
+  tmp = data.frame(h1 = ratio -0,
+                   h2 = ratio - 0.5,
+                   h3 = ratio - 1)
+  tmp1 = apply(tmp,1,function(y) return(y[abs(y) == min(abs(y))]))
+  return(tmp1)
+}
+
+mixfrac = seq(0,0.15, by = 0.002)
+mycoef = matrix(NA, nrow = length(mixfrac), ncol = 4)
+snp_pvalue = matrix(NA, ncol = length(mixfrac), nrow = nsnp)
+
+
+#for (sidx in 1:nsim){
+sizes = sample(seq(400,1500), nsnp)
+a1 = floor(nsnp/3)
+b1 = floor(nsnp/3)
+c1 = nsnp - a1 - b1
+  
+probs = c(rep(1,a1), rep(0,b1), rep(0.5,c1))
+  
+size1 = sample(sizes, length(sizes))
+  #size2 = sample(sizes, length(sizes))
+size2 = size1
+  
+#get genotype frequency and remove different bi-allele (difference of frequency is 1)
+prob1a = sample(probs, 10*length(probs), replace = TRUE)
+prob2a = sample(probs, 10*length(probs), replace = TRUE)
+prob1 = prob1a[which(abs(prob1a - prob2a) != 1)[1:100]]
+prob2 = prob2a[which(abs(prob1a - prob2a) != 1)[1:100]]
+  
+countR1 = floor(size1 *prob1)
+countA1 = floor(size1*(1-prob1))
+  
+countR2 = floor(size2 *prob2)
+countA2 = floor(size2 * (1-prob2))
+  
+dta1 = matrix(NA, ncol = length(mixfrac), nrow = nsnp)
+snpname = paste0("s",1:nsnp)
+  
+#genotype matching
+snp_identical = rep(1, nsnp)
+snp_identical[which(prob1 == prob2)] = 0
+
+#control
+countRC = countR1 + rpois(nsnp,lambda = lambda)
+countAC = countA1 + rpois(nsnp,lambda = lambda)
+pctR_control = countRC/(countRC + countAC)
+R_control = calculateR(pctR_control)
+
+for (idx in 1:length(mixfrac)){
+  #snp_pvalue[[sidx]] = matrix(NA, ncol = length(mixfrac), nrow = nsnp)
+  countR = floor(countR1*(1-mixfrac[idx]) + countR2*mixfrac[idx] + rpois(nsnp,lambda = lambda))
+  countA = floor(countA1*(1-mixfrac[idx]) + countA2*mixfrac[idx] + rpois(nsnp,lambda = lambda))
+  pctR = countR/(countR + countA)
+  R = calculateR(pctR)
+
+  #informative snp
+  #thep = gesd(obs = R, contrast = R_control, alpha = 0.1)[,2]
+  thep1 = pnorm(R, mean = mean(R_control), sd = sd(R_control))
+  thep = rep(0, length(R_control))
+  thep[thep1 < 0.5*alpha |thep1 > (1-0.5*alpha)] = 1
+  
+  snp_pvalue[,idx] = thep
+
+  if(sum(thep) == 0) next
+  
+  deltaR =  abs(R)[thep == 1] -abs(R_control)[thep == 1]
+
+  if (sum(thep) < 3){
+    mycoef[idx,1] <- mean(deltaR)
+  }else{
+    myfit = lm(deltaR ~ 1)
+    mycoef[idx,] = summary(myfit)$coefficients[1,]
+  }
+}
+```
+  
+### Accuracy of informative SNP calling   
+  
+With the simulation setting, decent precision (>60%) in informative SNP calling can be  acheived when the mixing fraction is greater than 2.5%. The precision becomes stable when the mixing fraction is greater than 4%.  
+  
+```{r}  
+prec = rep(0, length(mixfrac) - 1)
+for (i in 2:ncol(snp_pvalue)){
+  t1 = table(snp_identical, snp_pvalue[,i])
+  prec[i-1] = sum(t1[c(1,4)])/sum(t1)
+}
+
+plot(mixfrac[-1], prec, xlab = "Mixing fraction", ylab = "Accuracy", type = "b")
+
+```
+  
+### Accuracy of mixing fraction  
+  
+Very strong linear relationship can be observed when the mixing fraction is greater than 1%, however, the estimated fraction is about half of simulated fraction, suggesting a systematic bias in the model. We may need to improve the algorithm or set a correction based on training data and linear relationship.  
+  
+  
+```{r}
+plot(mixfrac,mycoef[,1],xlab = "Simulated mixing fractions", ylab= "Estimated fractions")
+
+```
+  
+### Statistical strength of fraction estimation  
+  
+When p value threshold is set at 0.001, the test can detect the mixing fraction as low as 1%. Although the noise level has an impact on this, it is evident that the test does deliver promising results.  
+  
+```{r}  
+plot(mycoef[,1], -log10(mycoef[,4]), xlab = "Estimated fractions", ylab = "-log10(pvalue)")
+abline(h = 3, col = "red")
+```
+  
+
+## Summary  
+  
+Based on the observed allele frequency, a new variable, frequency difference (R) between observed and theoretical frequencies, is generated. It is assumed that R is in normal distribution and the distribution parameters can be estimated with control sample.  Whether an observed frequency is informative and estimation of mixing fraction are inferred from R. In simulation setting, this algorithm can effectively detect >1% mixing fraction.  
+  
+This algorithm can be extended to loci with polymorphsim and to a mixture population with stable allelic frequency. One example for the later case is to monitor emerging of new tumor clone.  
+  
+Like other tests with sample mean, the test may be sensitive to outliers. Another key point is that this test may not work validly for situations with high mixing fraction since R is no longer what it is defined.  
+  
+The simulation results show that estimated mixing fraction does not accurately restore the true fraction. However, there is very strong linear relationship between them, this suggests post hoc correction could be used with training data.
+  
+## Appdendix: Why is absR not exactly same as mixing fraction?  
+  
+A simple simulation is performed to show R is not exactly same as the mixing fraction. Mixing fractions are between 0 and 24.5%. The total counts for each mixing are kept same, R is calculated as mentioned previously. Genotypes of the major and the minor cannot be both homozygous or same. The results show that change of allele frequency (absR) is half of the mixing fraction.  
+
+```{r}
+gt = expand.grid(major =c(0,0.5,1), minor = c(0,0.5,1))
+gt = gt[!abs(gt[,1] - gt[,2]) %in% c(0,1),]
+
+n1 = 200
+n2 =0:49
+n11 = n1 - n2
+frac = n2/n1
+frac1 = matrix(NA, nrow = nrow(gt), ncol = length(n2))
+
+for (i in 1:nrow(gt)){
+  frac1[i,] = (n11 *gt[i,1] + n2*gt[i,2])/n1
+}
+
+
+frac2 = apply(frac1, 2, function(x){
+  tmp = data.frame(x-0,
+                   x-0.5,
+                   x-1)
+  tmp1 = apply(tmp,1,function(y) return(y[abs(y) == min(abs(y))]))
+  return(tmp1)
+})
+
+frac3 = abs(frac2)
+
+plot(frac, frac3[1,], xlim = c(0,0.26), ylim = c(0,0.15), xlab = "Mixing fraction", ylab = "absR", type = "b", col = "red")
+#for (i in 2:nrow(frac3)){
+#  par(new = T)
+#  plot(frac, frac3[i,], xlim = c(0,0.26), ylim = c(0,0.15), xlab = "", ylab = "", xaxt = "n", yaxt= "n", type = "l", col = i)
+#}
+abline(0,1, col = "blue")
+text(x = 0.12, y = 0.1, labels = "y = x", col ="blue")
+
+```
+
+```{r}
+sessionInfo()
+```
+  
+  
+
