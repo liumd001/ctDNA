@@ -1,8 +1,12 @@
 This project aims at 
-    1) develop algorithm to detect allele frequency changes of SNPs with SNP NGS data when a sample is mixed with another sample; 
-     2) develop algorithm to estimate the mixing fractions; 3) wrap up the algorithm into an application for use.
 
-Invitae_assignment.Rmd: RMD file documenting the algorithm developing process and R code. For easy read without R code, please use Invitae_assignment.html.
+    1) developing an algorithm to detect allele frequency changes of SNPs with SNP NGS data when sample DNA is from different sources;
+    
+    2) developing an algorithm to estimate the mixing fractions of different sources; 
+    
+    3) wraping up the algorithm into an application for use.
+
+ctDNA_assignment.Rmd: RMD file documenting the algorithm developing process and R code. For easy read without R code, please use ctDNA_assignment.html.
 
 callinformativeSNP.R: wrap-up function, its input include: 
       control (files of control sample);
